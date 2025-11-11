@@ -1,4 +1,4 @@
-import { Component, For, createMemo } from "solid-js";
+import { Component, For, createMemo, createEffect } from "solid-js";
 import { ProcessTree, SortKey } from "../types/process";
 import { ProcessRow } from "./ProcessRow";
 
@@ -10,9 +10,25 @@ interface ProcessTableProps {
   onSelect: (pid: number) => void;
   onToggle: (pid: number) => void;
   onSort: (key: SortKey) => void;
+  scrollPosition?: number;
+  onScroll?: (position: number) => void;
 }
 
 export const ProcessTable: Component<ProcessTableProps> = (props) => {
+  let containerRef: HTMLDivElement | undefined;
+
+  // Restore scroll position after render
+  createEffect(() => {
+    if (containerRef && props.scrollPosition !== undefined) {
+      containerRef.scrollTop = props.scrollPosition;
+    }
+  });
+
+  const handleScroll = () => {
+    if (containerRef && props.onScroll) {
+      props.onScroll(containerRef.scrollTop);
+    }
+  };
   const flattenProcesses = (
     processes: ProcessTree[],
     depth: number = 0
@@ -37,7 +53,11 @@ export const ProcessTable: Component<ProcessTableProps> = (props) => {
   };
 
   return (
-    <div class="process-table-container">
+    <div
+      class="process-table-container"
+      ref={containerRef}
+      onScroll={handleScroll}
+    >
       <table class="process-table">
         <thead>
           <tr>

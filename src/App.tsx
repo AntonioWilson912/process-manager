@@ -9,13 +9,14 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { Tabs } from "./components/Tabs";
 import { ProcessTable } from "./components/ProcessTable";
 import { SearchBar } from "./components/SearchBar";
+import { fuzzySearch, searchByPid } from "./utils/fuzzySearch";
 import {
   ProcessInfo,
   ProcessTree,
   SortKey,
   SortDirection,
+  ExpandedState,
 } from "./types/process";
-import { fuzzySearch } from "./utils/fuzzySearch";
 
 const App: Component = () => {
   const [activeTab, setActiveTab] = createSignal("Processes");
@@ -26,14 +27,18 @@ const App: Component = () => {
   const [sortDirection, setSortDirection] = createSignal<SortDirection>("asc");
   const [error, setError] = createSignal<string | null>(null);
   const [processCount, setProcessCount] = createSignal(0);
+  const [expandedState, setExpandedState] = createSignal<ExpandedState>({});
+  const [lastScrollPosition, setLastScrollPosition] = createSignal(0);
 
   const buildProcessTree = (processes: ProcessInfo[]): ProcessTree[] => {
     const processMap = new Map<number, ProcessTree>();
     const roots: ProcessTree[] = [];
+    const currentExpanded = expandedState();
 
-    // Create tree nodes
+    // Create tree nodes - default to collapsed unless user has expanded
     processes.forEach((p) => {
-      processMap.set(p.pid, { ...p, children: [], expanded: true });
+      const isExpanded = currentExpanded[p.pid] ?? false;
+      processMap.set(p.pid, { ...p, children: [], expanded: isExpanded });
     });
 
     // Build tree structure
@@ -50,6 +55,45 @@ const App: Component = () => {
   };
 
   const categorizeProcesses = (trees: ProcessTree[]): ProcessTree[] => {
+    const currentExpanded = expandedState();
+
+    const sortTrees = (trees: ProcessTree[]): ProcessTree[] => {
+      return [...trees]
+        .sort((a, b) => {
+          let comparison = 0;
+          switch (sortKey()) {
+            case "pid":
+              comparison = a.pid - b.pid;
+              break;
+            case "name":
+              comparison = a.name.localeCompare(b.name);
+              break;
+            case "cpu":
+              comparison = a.cpu - b.cpu;
+              break;
+            case "memory":
+              comparison = a.memory - b.memory;
+              break;
+            case "disk":
+              comparison = a.disk - b.disk;
+              break;
+            case "network":
+              comparison = a.network - b.network;
+              break;
+          }
+          return sortDirection() === "asc" ? comparison : -comparison;
+        })
+        .map((tree) => ({
+          ...tree,
+          children: sortTrees(tree.children),
+        }));
+    };
+
+    // Only categorize when sorted by name
+    if (sortKey() !== "name") {
+      return sortTrees(trees);
+    }
+
     const apps: ProcessTree[] = [];
     const background: ProcessTree[] = [];
     const windows: ProcessTree[] = [];
@@ -68,64 +112,42 @@ const App: Component = () => {
       }
     });
 
-    const sortTrees = (trees: ProcessTree[]): ProcessTree[] => {
-      return [...trees].sort((a, b) => {
-        let comparison = 0;
-        switch (sortKey()) {
-          case "pid":
-            comparison = a.pid - b.pid;
-            break;
-          case "name":
-            comparison = a.name.localeCompare(b.name);
-            break;
-          case "cpu":
-            comparison = a.cpu - b.cpu;
-            break;
-          case "memory":
-            comparison = a.memory - b.memory;
-            break;
-          case "disk":
-            comparison = a.disk - b.disk;
-            break;
-          case "network":
-            comparison = a.network - b.network;
-            break;
-        }
-        return sortDirection() === "asc" ? comparison : -comparison;
-      });
-    };
-
     const createCategoryNode = (
       name: string,
+      id: number,
       processes: ProcessTree[]
-    ): ProcessTree => ({
-      pid: -1,
-      name,
-      cpu: 0,
-      memory: 0,
-      disk: 0,
-      network: 0,
-      parent_pid: null,
-      category: "app",
-      children: sortTrees(processes),
-      expanded: true,
-    });
+    ): ProcessTree => {
+      const isExpanded = currentExpanded[id] ?? false;
+      return {
+        pid: id,
+        name,
+        cpu: 0,
+        memory: 0,
+        disk: 0,
+        network: 0,
+        parent_pid: null,
+        category: "app",
+        children: sortTrees(processes),
+        expanded: isExpanded,
+      };
+    };
 
     const result: ProcessTree[] = [];
     if (apps.length > 0) {
-      result.push(createCategoryNode(`Apps (${apps.length})`, apps));
+      result.push(createCategoryNode(`Apps (${apps.length})`, -1, apps));
     }
     if (background.length > 0) {
       result.push(
         createCategoryNode(
           `Background processes (${background.length})`,
+          -2,
           background
         )
       );
     }
     if (windows.length > 0) {
       result.push(
-        createCategoryNode(`Windows processes (${windows.length})`, windows)
+        createCategoryNode(`Windows processes (${windows.length})`, -3, windows)
       );
     }
 
@@ -133,24 +155,55 @@ const App: Component = () => {
   };
 
   const filterProcesses = (trees: ProcessTree[]): ProcessTree[] => {
-    const query = searchQuery();
+    const query = searchQuery().trim();
     if (!query) return trees;
 
-    const filterTree = (tree: ProcessTree): ProcessTree | null => {
-      const matchesSearch = fuzzySearch(query, tree.name);
+    // Check if query is numeric (PID search)
+    const isNumericQuery = /^\d+$/.test(query);
+
+    const filterTree = (
+      tree: ProcessTree
+    ): { tree: ProcessTree; score: number } | null => {
+      let matchScore = 0;
+
+      if (isNumericQuery) {
+        // PID search - exact match
+        if (searchByPid(query, tree.pid)) {
+          matchScore = 100;
+        }
+      } else {
+        // Fuzzy name search
+        const result = fuzzySearch(query, tree.name);
+        if (result.matches) {
+          matchScore = result.score;
+        }
+      }
+
       const filteredChildren = tree.children
         .map(filterTree)
-        .filter((child): child is ProcessTree => child !== null);
+        .filter(
+          (child): child is { tree: ProcessTree; score: number } =>
+            child !== null
+        )
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.tree);
 
-      if (matchesSearch || filteredChildren.length > 0) {
-        return { ...tree, children: filteredChildren };
+      if (matchScore > 0 || filteredChildren.length > 0) {
+        return {
+          tree: { ...tree, children: filteredChildren },
+          score: Math.max(matchScore, ...filteredChildren.map(() => 0)),
+        };
       }
       return null;
     };
 
     return trees
       .map(filterTree)
-      .filter((tree): tree is ProcessTree => tree !== null);
+      .filter(
+        (item): item is { tree: ProcessTree; score: number } => item !== null
+      )
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.tree);
   };
 
   const fetchProcesses = async () => {
@@ -168,6 +221,11 @@ const App: Component = () => {
   };
 
   const toggleProcess = (pid: number) => {
+    setExpandedState((prev) => ({
+      ...prev,
+      [pid]: !prev[pid],
+    }));
+
     const toggle = (trees: ProcessTree[]): ProcessTree[] => {
       return trees.map((tree) => {
         if (tree.pid === pid) {

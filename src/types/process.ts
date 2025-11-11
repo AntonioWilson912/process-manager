@@ -14,5 +14,9 @@ export interface ProcessTree extends ProcessInfo {
   expanded: boolean;
 }
 
+export interface ExpandedState {
+  [key: number]: boolean;
+}
+
 export type SortKey = "pid" | "name" | "cpu" | "memory" | "disk" | "network";
 export type SortDirection = "asc" | "desc";

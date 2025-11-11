@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "tauri": "tauri"
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "prebuild": "mkdir -p dist || mkdir dist 2>nul"
   },
   "dependencies": {
     "solid-js": "^1.8.0",
